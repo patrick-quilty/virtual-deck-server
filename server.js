@@ -17,14 +17,13 @@ const io = require("socket.io")(server, {
   handlePreflightRequest: (req, res) => {
     const headers = {
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      "Access-Control-Allow-Origin": process.env.CLIENT_URL,
+      "Access-Control-Allow-Origin": 'https://test-deck.herokuapp.com',
       "Access-Control-Allow-Credentials": true
     };
     res.writeHead(200, headers);
     res.end();
   }
 });
-
 
 
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
@@ -72,8 +71,9 @@ app.post('/newGame', function (req, res) {
         'game': '' + req.body.game,
         'players': '' + req.body.players,
         'users': '[]',
-        'otherCardLocations': '{}',
-        'chatLog': '[]'
+        'gameData': '' + req.body.gameData,
+        'chatLog': `["Game Number ${req.body.gameNumber}: ${req.body.game} - ` + 
+          `${req.body.players} Players"]`
       }
     }
   ], function(err, records) {
@@ -148,65 +148,64 @@ io.on('connection', (socket) => {
     // Send connect message to the database and the gameRoom
     const message = getCurrentTime() + ' ' + userName + ' entered the room';
     postToChatLog(dbGameId, message);
-    io.in(gameNumber).emit('chatLogMessage', message);
+    io.in(gameNumber).emit('updateRoom', {chatLog: message});
+    io.in(gameNumber).emit('keepAlive', '');
+    setInterval(function(){ // Send Pong
+      socket.emit('stayAlive', '');
+    }, 10000);
   });
+  socket.on('keepAlive', () => {}); // Receive Ping
 
   // Send message to database and clients
   socket.on('chatLogMessage', (newMessage) => {
-    const message = getCurrentTime() + ' ' + userName + ': ' +newMessage;
+    const message = getCurrentTime() + ' ' + userName + ': ' + newMessage;
     postToChatLog(dbGameId, message);
-    io.in(gameNumber).emit('chatLogMessage', message);
+    io.in(gameNumber).emit('updateRoom', {chatLog: message});
   });
 
-  // Send updated userList to database and clients
+  // Send game event message to database and clients
+  socket.on('gameEventMessage', (newMessage) => {
+    const message = getCurrentTime() + ' ' + newMessage;
+    postToChatLog(dbGameId, message);
+    io.in(gameNumber).emit('updateRoom', {chatLog: message});
+  });
+
+  // Update user
   socket.on('updateUser', async (userInfo) => {
     const newUsers = await updateUserList(dbGameId, userInfo);
-    io.in(gameNumber).emit('updateUserList', newUsers);
+    const gameData = await getGameData(dbGameId);
+    io.in(gameNumber).emit('updateRoom', {users: newUsers, gameData: gameData});
   });
 
-  // Send updated userList seat status to database and clients
-  socket.on('standUpInGame', async (userData) => {
-    const newUsers = await standUpInGame(dbGameId, userData, newUserObject);
-    io.in(gameNumber).emit('updateUserList', newUsers);
+  // Update all seated users' inGame status
+  socket.on('setInGame', async (status) => {
+    const newUsers = await setInGame(dbGameId, status);
+    io.in(gameNumber).emit('updateRoom', {users: newUsers});
   });
 
-  // Send updated userList without Cards Waiting user to database and clients
-  socket.on('removeCardsWaiting', async (seat) => {
-    const newUsers = await removeCardsWaiting(dbGameId, seat, userName);
-    io.in(gameNumber).emit('updateUserList', newUsers);
+  // Update gameData
+  socket.on('updateGameData', async (gameData) => {
+    const newGameData = await updateGameData(dbGameId, gameData);
+    io.in(gameNumber).emit('updateRoom', {gameData: newGameData});
   });
 
-  // Send updated userList with inGame status to database and clients
-  socket.on('startGame', async () => {
-    const newUsers = await startGame(dbGameId);
-    io.in(gameNumber).emit('updateUserList', newUsers);
-  });
-
-  // Send updated userList with inGame status to database and clients
-  socket.on('endGame', async () => {
-    const newUsers = await endGame(dbGameId);
-    io.in(gameNumber).emit('updateUserList', newUsers);
-  });
-
-
-
-
-
-
-
-
-
-
-
+  //
+  // Hold onto this for now until decided about sorting cards
+  //
+  // Update user and gameData
+  // socket.on('updateUserAndGameData', async (data) => {
+  //   const newUsers = await updateUserList(dbGameId, data.user);
+  //   const newGameData = await updateGameData(dbGameId, data.gameData);
+  //   io.in(gameNumber).emit('updateRoom', {users: newUsers, gameData: newGameData});
+  // });
 
   // Disconnect processes
-  socket.on('disconnect', async () => {
+  socket.on('disconnect', async (reason) => {
     // Update user list and send leave message to database and gameRoom
     const message = getCurrentTime() + ' ' + userName + ' left the room';
     postToChatLog(dbGameId, message);
     const newUsers = await removeUserFromList(dbGameId, userName);
-    io.in(gameNumber).emit('updateUserList', newUsers);
-    io.in(gameNumber).emit('chatLogMessage', message);
+    io.in(gameNumber).emit('updateRoom', {chatLog: message, users: newUsers});
   });
 });
 
@@ -269,32 +268,6 @@ async function updateUserList(dbGameId, userInfo) {
   return (JSON.stringify(newUsers));
 }
 
-async function standUpInGame(dbGameId, userData, newUserObject) {
-  // If user stands up mid game the cards are saved at the seat
-
-  // Get all users
-  const record = await base('GameRoomTable').find(dbGameId);
-  const users = JSON.parse(record.fields.users);
-
-  // Format new users list
-  let newUsers = users.filter(user => user.name !== userData.name);
-  let newSeat = JSON.parse(newUserObject);
-  newSeat.name = userData.name;
-  newUsers.push(newSeat);
-  let cardsWaiting = userData;
-  cardsWaiting.name = 'Cards Waiting';
-  newUsers.push(cardsWaiting);
-
-  // Post the users list to the database
-  base('GameRoomTable')
-    .update([{
-      'id': dbGameId,
-      'fields': { 'users': JSON.stringify(newUsers) }
-    }]);
-
-  return (JSON.stringify(newUsers));
-}
-
 async function removeUserFromList(dbGameId, userName) {
   // On disconecting from the socket remove the user from the userlist on the database
 
@@ -304,11 +277,6 @@ async function removeUserFromList(dbGameId, userName) {
 
   // Format new users list
   let newUsers = users.filter(user => user.name !== userName);
-  let leavingUser = users.find(user => user.name === userName);
-  if (leavingUser.inGame) {
-    leavingUser.name = 'Cards Waiting';
-    newUsers.push(leavingUser);
-  }
 
   // Post the users list to the database
   base('GameRoomTable')
@@ -320,40 +288,8 @@ async function removeUserFromList(dbGameId, userName) {
   return (JSON.stringify(newUsers));
 }
 
-async function removeCardsWaiting(dbGameId, seat, userName) {
-  // Remove Cards Waiting user upon a user sitting in
-
-  // Get all users
-  const record = await base('GameRoomTable').find(dbGameId);
-  const users = JSON.parse(record.fields.users);
-
-  // Create Current User's new user object from the Cards Waiting user object
-  let pickingUpCards = users.filter(user =>
-      (user.name === 'Cards Waiting' && user.seat === seat));
-  pickingUpCards[0].name = userName;
-
-  // Create array without Current User's user object
-  const withoutCurrentUser = users.filter(user => user.name !== userName);
-
-  // Create array without Current User or Cards Waiting
-  let newUsers = withoutCurrentUser.filter(user =>
-      (user.name !== 'Cards Waiting' || user.seat !== seat));
-
-  // Push new User object to array
-  newUsers.push(pickingUpCards[0]);
-
-  // Post the users list to the database
-  base('GameRoomTable')
-    .update([{
-      'id': dbGameId,
-      'fields': { 'users': JSON.stringify(newUsers) }
-    }]);
-
-  return (JSON.stringify(newUsers));
-}
-
-async function startGame(dbGameId) {
-  // Update all sitting users' inGame status to true
+async function setInGame(dbGameId, status) {
+  // Update all sitting users' inGame status
 
   // Get all users
   const record = await base('GameRoomTable').find(dbGameId);
@@ -361,13 +297,13 @@ async function startGame(dbGameId) {
 
   // Create array of sitting users and modify
   let sitting = users.filter(user => user.seat  !== 'chatRoom');
-  sitting = sitting.map(user => {user.inGame = true;  return user;});
+  sitting = sitting.map(user => {user.inGame = status;  return user;});
 
   // Create array of non-sitting users
   let newUsers = users.filter(user => user.seat === 'chatRoom');
 
   // Merge them
-  sitting.map(user => newUsers.push(user));
+  sitting.forEach(user => newUsers.push(user));
 
   // Post the users list to the database
   base('GameRoomTable')
@@ -379,35 +315,38 @@ async function startGame(dbGameId) {
   return (JSON.stringify(newUsers));
 }
 
-async function endGame(dbGameId) {
-  // Update all sitting users' inGame status to true
-
-  // Get all users
+async function getGameData(dbGameId) {
   const record = await base('GameRoomTable').find(dbGameId);
-  const users = JSON.parse(record.fields.users);
+  const gameData = JSON.parse(record.fields.gameData);
+  return (JSON.stringify(gameData));
+}
 
-  // Create array of sitting users and modify
-  let sitting = users.filter(user => user.seat  !== 'chatRoom');
-  sitting = sitting.map(user => {user.inGame = false;  return user;});
+async function updateGameData(dbGameId, gameData) {
+  // Update the database gameData
 
-  // Create array of non-sitting users
-  let newUsers = users.filter(user => user.seat === 'chatRoom');
+  // Get current gameData
+  const record = await base('GameRoomTable').find(dbGameId);
+  let newGameData = JSON.parse(record.fields.gameData);
 
-  // Merge them
-  sitting.map(user => newUsers.push(user));
+  // Set the new gameData
+  let newKeys = Object.keys(gameData);
+  newKeys.forEach(key => {
+    if (['cards', 'bids', 'round'].includes(key)) {
+      newGameData[key] = Object.assign(newGameData[key], gameData[key]);
+    } else {
+      newGameData[key] = gameData[key]
+    }
+  });
 
-  // Post the users list to the database
+  // Post the gameData to the database
   base('GameRoomTable')
     .update([{
       'id': dbGameId,
-      'fields': { 'users': JSON.stringify(newUsers) }
+      'fields': { 'gameData': JSON.stringify(newGameData) }
     }]);
 
-  return (JSON.stringify(newUsers));
+  return (JSON.stringify(newGameData));
 }
-
-
-
 
 server.listen(PORT, function () {
  console.log('Server listening on port:', PORT);
