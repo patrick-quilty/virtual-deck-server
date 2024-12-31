@@ -7,24 +7,41 @@ require('dotenv').config();
 
 const app = express();
 
-app.use(cors());
+const allowedOrigins = ['https://patrick-quilty.github.io', 'https://patrick-quilty.github.io/virtual-deck-client']
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true)
+    } else {
+      callback(new Error('Not allowed by CORS, duh'))
+    }
+  }
+}))
+
 app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 8080;
 
 
-const server = require('http').createServer(app);
+const server = require('http').createServer(app)
 const io = require("socket.io")(server, {
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  cors: {
+    origin: allowedOrigins,
+    methods: ['GET', 'POST']
+  },
   handlePreflightRequest: (req, res) => {
     const headers = {
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      "Access-Control-Allow-Origin": 'https://test-deck.herokuapp.com',
-      "Access-Control-Allow-Credentials": true
-    };
-    res.writeHead(200, headers);
-    res.end();
-  }
-});
+      "Access-Control-Allow-Origin": req.headers.origin,
+      "Access-Control-Allow-Credentials": true,
+    }
+    res.writeHead(200, headers)
+    res.end()
+  },
+})
 
 
 const AIRTABLE_PERSONAL_ACCESS_TOKEN = process.env.AIRTABLE_PERSONAL_ACCESS_TOKEN;
@@ -102,10 +119,10 @@ app.post('/newUser', function (req, res) {
 
       // Format the updated userList object
       const commaIfNeeded = record[0].fields.users.length === 2 ? '' : ',';
-      let newUserObject = JSON.parse(req.body.newUserObject);
-      newUserObject.name = req.body.userName
+      let newUserObjectData = JSON.parse(req.body.newUserObject);
+      newUserObjectData.name = req.body.userName
       const userList = record[0].fields.users.slice(0, -1) +
-          commaIfNeeded + JSON.stringify(newUserObject) + ']';
+        commaIfNeeded + JSON.stringify(newUserObjectData) + ']';
 
       // Post the userList to the database
       base('GameRoomTable')
@@ -128,14 +145,15 @@ io.on('connection', (socket) => {
   let userName = '';
   let gameNumber = '';
   let dbGameId = '';
-  let newUserObject = '';
+  // let newUserObject = '';
+  let stayAliveInterval = '';
 
   // First connection setup
   socket.on('first-contact', async (initialData) => {
     // Define socket variables
     userName = initialData.userName;
     gameNumber = initialData.gameNumber;
-    newUserObject = initialData.newUserObject;
+    // newUserObject = initialData.newUserObject;
 
     // Join the socket for the right game
     socket.join(gameNumber);
@@ -150,14 +168,11 @@ io.on('connection', (socket) => {
 
     // Send connect message to the database and the gameRoom
     const message = getCurrentTime() + ' ' + userName + ' entered the room';
-    postToChatLog(dbGameId, message);
-    io.in(gameNumber).emit('updateRoom', {chatLog: message});
+    await postToChatLog(dbGameId, message);
+    io.in(gameNumber).emit('updateRoom', { chatLog: message });
     io.in(gameNumber).emit('keepAlive', '');
-    setInterval(function(){ // Send Pong
-      socket.emit('stayAlive', '');
-    }, 10000);
+    stayAliveInterval = setInterval(() => socket.emit('stayAlive', ''), 10000) // Send Pong
   });
-  socket.on('keepAlive', () => {}); // Receive Ping
 
   // Send message to database and clients
   socket.on('chatLogMessage', (newMessage) => {
@@ -205,6 +220,7 @@ io.on('connection', (socket) => {
   // Disconnect processes
   socket.on('disconnect', async (reason) => {
     // Update user list and send leave message to database and gameRoom
+    clearInterval(stayAliveInterval)
     const message = getCurrentTime() + ' ' + userName + ' left the room';
     postToChatLog(dbGameId, message);
     const newUsers = await removeUserFromList(dbGameId, userName);
@@ -213,11 +229,9 @@ io.on('connection', (socket) => {
 });
 
 async function getGameRoomData(gameNumber) {
-  let records = await (
-    base('GameRoomTable')
-      .select({filterByFormula: 'gameNumber = ' + gameNumber})
-      .firstPage()
-  );
+  let records = await base('GameRoomTable')
+    .select({ filterByFormula: 'gameNumber = ' + gameNumber })
+    .firstPage();
   return records[0];
 }
 
@@ -272,7 +286,7 @@ async function updateUserList(dbGameId, userInfo) {
 }
 
 async function removeUserFromList(dbGameId, userName) {
-  // On disconecting from the socket remove the user from the userlist on the database
+  // On disconnecting from the socket remove the user from the userlist on the database
 
   // Get all users
   const record = await base('GameRoomTable').find(dbGameId);
