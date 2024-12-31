@@ -27,11 +27,13 @@ const io = require("socket.io")(server, {
 });
 
 
-const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_PERSONAL_ACCESS_TOKEN = process.env.AIRTABLE_PERSONAL_ACCESS_TOKEN;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const Airtable = require('airtable');
-const base = new Airtable({apiKey: AIRTABLE_API_KEY}).base(AIRTABLE_BASE_ID);
-
+const base = new Airtable({
+  endpointUrl: 'https://api.airtable.com',
+  apiKey: AIRTABLE_PERSONAL_ACCESS_TOKEN
+}).base(AIRTABLE_BASE_ID);
 
 
 // Restful validation before joining webSocket
